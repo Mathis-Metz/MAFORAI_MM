@@ -1,81 +1,64 @@
-# Astronomical Transient Classification – ML & LLM Prototype
+# Transient Copilot
 
-## Overview
+**Turning raw SkyPortal data into ML-ready datasets, with a local LLM as an astronomer's copilot.**
 
-This repository presents a prototype pipeline for astronomical transient classification
-using SkyPortal-like JSON data. The objective is to demonstrate how heterogeneous,
-deeply nested API outputs can be transformed into structured datasets suitable for
-machine learning, and how Large Language Models (LLMs) can act as an astronomer
-“copilot” during candidate vetting.
+Time-domain surveys such as ZTF produce far more transient candidates than astronomers can inspect. Platforms like [SkyPortal](https://skyportal.io) gather everything known about each candidate (photometry, spectra, TNS reports, redshifts, comments), but as deeply nested JSON that no model can use directly.
 
-The focus is on design choices, robustness, and scientific realism rather than
-model complexity or performance.
+This prototype does two things:
 
----
+1. **Structures the data**: it extracts a minimal, ML-relevant core from SkyPortal-like JSON into two clean Parquet tables.
+2. **Assists vetting**: a local LLM (Mistral 7B Instruct via [Ollama](https://ollama.com)) reads each structured candidate and writes a short assessment.
 
-## Project Context
+## 1. Data structuring
 
-Modern time-domain surveys generate many transient candidates with incomplete
-and noisy information. Platforms such as SkyPortal aggregate rich multi-modal data
-(photometry, metadata, comments, follow-up requests, external catalogs), but this
-data is not directly ML-ready.
+| dataset | one row per | content |
+|---|---|---|
+| `sources.parquet` | transient | position, detection score, SkyPortal flags (`is_transient`, `is_varstar`, `is_roid`), redshift, TNS label, availability flags (`has_tns`, `has_spectra`, `has_photometry`), photometry and spectra counts |
+| `lightcurves.parquet` | photometric point | time (JD), measurement, error, filter, detection flag |
 
-The core challenge addressed here is structuring this data while preserving
-uncertainty, and using LLMs to reason over partially available information.
+Design choices:
 
----
+- **Keep only what a classifier needs** instead of flattening the whole schema.
+- **Never impute missing data.** A missing value stays `None`, and its absence is recorded explicitly: a candidate with no TNS report is itself information.
+- **Long format for light curves**, so that sources with any number of points and filters fit in one table.
 
-## Data Structuring (Part 1)
+## 2. LLM copilot
 
-Instead of flattening the full JSON schema, we extract a minimal, ML-relevant core
-and store it in two Parquet datasets:
+For each transient, the copilot builds a prompt from the structured row and a summary of its light curve, then asks the model to:
 
-### Source-level dataset (`sources.parquet`)
-One row per transient, including:
-- sky position and detection score,
-- SkyPortal-native flags (`is_transient`, `is_varstar`, `is_roid`),
-- optional enrichment (redshift, TNS label),
-- explicit availability flags (`has_tns`, `has_spectra`, `has_photometry`),
-- simple counts of photometry and spectra.
+- summarize the key information,
+- judge whether the source is likely extragalactic,
+- recommend follow-up observations.
 
-### Lightcurve dataset (`lightcurves.parquet`)
-Long-format photometry (one row per observation) with time, flux, filter, and
-detection flag.
+The prompt ranks evidence by reliability: TNS classifications, spectra and redshifts count as strong evidence, while pipeline flags count as weak heuristics. The model is asked to state its uncertainty.
 
-Missing data is propagated as `None` or empty structures and is never imputed.
-The absence of information (e.g. no TNS report) is treated as informative.
+Example output for `ZTF25aaktqzg` (abridged):
 
----
+> **Key information:** high detection score (0.9999); reported to TNS and classified as SN Ia; redshift 0.0061; spectra available; observed for about 71 days in several filters.
+>
+> **Likely extragalactic:** yes, given the TNS classification and the redshift, although the pipeline's `is_transient` flag is false, which adds some uncertainty.
 
-## LLM-Based Astronomer Copilot (Part 2)
+## Repository layout
 
-A local instruction-tuned LLM (Mistral) is used as a reasoning layer on top of the
-structured data. The copilot:
-- summarizes key information for each transient,
-- assesses the likelihood of extragalactic origin,
-- suggests appropriate follow-up observations,
-- answers user-driven questions.
+```
+src/
+  parser.py        JSON loading, validation, field extraction
+  dataset.py       source-level table
+  lightcurves.py   long-format light-curve table
+  llm_copilot.py   prompt building and Ollama calls
+notebooks/
+  Pipeline.ipynb   end-to-end run: inspection → Parquet → copilot
+```
 
-The prompt is stage-aware: TNS reports, spectra, and redshift measurements are
-treated as high-confidence signals, while pipeline heuristic flags are treated as
-lower-confidence.
+## Running it
 
----
+```bash
+pip install -r requirements.txt
+ollama pull mistral:7b-instruct
+```
 
-## Evaluation & Limitations
+Put a SkyPortal sources export (a JSON list of source objects) at `data/sources_sample.json`, then run `notebooks/Pipeline.ipynb`. The sample data used during development is not included in this repository.
 
-This prototype is evaluated qualitatively. The copilot produces reasonable,
-conservative summaries and follow-up suggestions, especially under limited
-information.
+## Scope and limitations
 
-No supervised ML models are trained, no image-based features are used, and no
-external catalog retrieval is implemented. These choices are deliberate given
-the scope of the exercise.
-
----
-
-## Conclusion
-
-This project demonstrates robust handling of complex astronomical JSON data,
-principled feature selection, and a realistic integration of LLMs as scientific
-copilots, with an emphasis on clarity and defensible design choices.
+This is a prototype built in a few days, and its evaluation is qualitative. No supervised classifier is trained, no image features (cutouts) are used, and no external catalogs are queried. The natural next steps would be light-curve features (rise and decline rates, colors) and a classifier trained on TNS-labelled sources, with the LLM kept as an explanation layer.
